@@ -25,3 +25,6 @@ dist-ssr
 
 # 书籍
 《WebGPU 指南：浏览器中的高性能图形与机器学习》
+
+# 示例代码
+space_shooter_game
