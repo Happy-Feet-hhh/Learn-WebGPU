@@ -1,14 +1,20 @@
 // 从shader源代码引入
 import shaderSource from "./shaders/shader.wgsl?raw";
+import { QuadGeometry } from "./geometry";
+import { Texture } from "./texture";
 
 class Renderer {
   private context!: GPUCanvasContext;
   private device!: GPUDevice;
   private pipeline!: GPURenderPipeline;
-  // 新增 顶点位置缓冲区
   private positionBuffer!: GPUBuffer;
-  // 新增 顶点颜色缓冲区
   private colorBuffer!: GPUBuffer;
+  // 新增 纹理缓冲区
+  private textureBuffer!: GPUBuffer;
+  // 新增 纹理绑定组
+  private textureBindGroup!: GPUBindGroup;
+  // 新增 测试用的图像纹理
+  private testTexture!: Texture;
 
   constructor() {}
   
@@ -44,35 +50,24 @@ class Renderer {
       format: navigator.gpu.getPreferredCanvasFormat(),
     });
 
-    // 新增 在CPU侧定义好顶点的相关数据 位置 颜色
-    // 使用新的 私有方法 this.createBuffer()
-    this.positionBuffer = this.createBuffer(new Float32Array([
-      -0.5, -0.5, // x, y 共六个顶点位置
-      0.5, -0.5,
-      -0.5, 0.5,
-      -0.5, 0.5,
-      0.5, 0.5,
-      0.5, -0.5
-    ]))
+    // 新增 创建纹理
+    this.testTexture = await Texture.createTextureFromURL(this.device, "src/assets/uv_test.png");
 
-    this.colorBuffer = this.createBuffer(new Float32Array([
-      1.0, 0.0, 1.0,  // r g b 第一个顶点的颜色
-      0.0, 1.0, 1.0,
-      0.0, 1.0, 1.0,
-      1.0, 0.0, 0.0,  // r g b 第四个顶点的颜色
-      0.0, 1.0, 0.0,
-      0.0, 0.0, 1.0,
-    ]))
+    // 新增 在CPU侧定义好顶点的相关数据 位置 颜色 与 纹理坐标
+    // 使用新封装的  QuadGeometry 类
+    const geometry = new QuadGeometry();
+    // 直接使用 geometry 对象创建 GPUBuffer
+    this.positionBuffer = this.createBuffer(new Float32Array(geometry.positions));
+    this.colorBuffer = this.createBuffer(new Float32Array(geometry.colors));
+    this.textureBuffer = this.createBuffer(new Float32Array(geometry.texCoords));
 
     // 新增，准备shader module 着色器模块
     this.prepareModel();
   }
 
-  // 新增 私有方法 createBuffer() 用于创建各种缓冲区
-  // 传入参数是一个 f32 数组
   private createBuffer(data: Float32Array): GPUBuffer {
     const buffer = this.device.createBuffer({
-      size: data.byteLength,  // 为啥是byteLength而不是length
+      size: data.byteLength, 
       usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
       mappedAtCreation: true
     });
@@ -88,9 +83,6 @@ class Renderer {
       code: shaderSource
     });
 
-    // 虽然我们创建了顶点缓冲区，但是还需要创建布局才能应用
-    // 之前的数据我们人脑自己划分了数据的界限，比如一行算一个顶点位置，两个f32数据
-    // 但是没有手动设置到渲染管线中
     const positionBufferLayout: GPUVertexBufferLayout = {
       arrayStride: 2 * Float32Array.BYTES_PER_ELEMENT, // 2 个浮点数 × 每个浮点数 4 字节
       attributes: [
@@ -115,13 +107,26 @@ class Renderer {
       stepMode: "vertex"
     };
 
+    // 新增 创建纹理坐标布局 也是顶点缓冲
+    const textureCoordsLayout: GPUVertexBufferLayout = {
+      arrayStride: 2 * Float32Array.BYTES_PER_ELEMENT,
+      attributes: [
+        {
+          shaderLocation: 2,
+          offset: 0,
+          format: "float32x2"
+        }
+      ],
+      stepMode: "vertex"
+    };
+
     const vertexState: GPUVertexState = {
       module: shaderModule,
       entryPoint: "vertexMain",
       buffers: [
-        // 新增 将缓冲区布局插入
         positionBufferLayout,
-        colorBufferLayout
+        colorBufferLayout,
+        textureCoordsLayout
       ]
     };
 
@@ -130,15 +135,66 @@ class Renderer {
       entryPoint: "fragmentMain",
       targets: [
         {
-          format: navigator.gpu.getPreferredCanvasFormat()
+          format: navigator.gpu.getPreferredCanvasFormat(),
+          // 新增 添加混合字段的属性 也就是 fragShader 的 @location(1) 了
+          blend: {
+            color: {
+              srcFactor: "one",
+              dstFactor: "one-minus-src-alpha",
+              operation: "add"
+            },
+            alpha: {
+              srcFactor: "one",
+              dstFactor: "one-minus-src-alpha",
+              operation: "add"
+            }
+          }
         }
       ]
     };
 
-    // 注意：WebGPU中不需要自己创建RenderPipeline的Layout, 因为可以auto
-    // Render Pipeline Layout里保存了 bind_group相关的信息
+    // 由于纹理使用了binding group 所以需要手动定义布局
+    const textureBindGroupLayout = this.device.createBindGroupLayout({
+      entries: [
+        // 第一个entries的数组元素，对应@binding(0)
+        {
+          binding: 0,
+          visibility: GPUShaderStage.FRAGMENT,
+          sampler: {}
+        },
+        // 第二个entries的数组元素，对应@binding(1)
+        {
+          binding: 1,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: {}
+        }
+      ]
+    }); 
+    
+    // 新增 对应的管线布局也要手动创建
+    const pipelineLayout = this.device.createPipelineLayout({
+      bindGroupLayouts: [
+        textureBindGroupLayout
+      ]
+    });
+
+    // 有了管线布局和绑定组布局后才可以创建绑定组
+    this.textureBindGroup = this.device.createBindGroup({
+      layout: textureBindGroupLayout,
+      entries: [
+        {
+          binding: 0,
+          resource: this.testTexture.sampler
+        },
+        {
+          binding: 1,
+          resource: this.testTexture.texture.createView()
+        }
+      ]
+    });
+
     this.pipeline = this.device.createRenderPipeline({
-      layout: "auto",
+      layout: pipelineLayout,
       vertex: vertexState,
       fragment: fragmentState,
       primitive: {
@@ -163,11 +219,10 @@ class Renderer {
     const passEncoder = commandEncoder.beginRenderPass(rendePassDescriptor);
     // DRAW HERE
     passEncoder.setPipeline(this.pipeline);
-    // 新增 在renderpass解码器中设置GPU缓冲区
-    // 因为之前都是创建CPU端的数据，和描述缓冲区的具体布局
-    // 这里才是在GPU端设置内存(缓冲区)
     passEncoder.setVertexBuffer(0, this.positionBuffer);
     passEncoder.setVertexBuffer(1, this.colorBuffer);
+    passEncoder.setVertexBuffer(2, this.textureBuffer);
+    passEncoder.setBindGroup(0, this.textureBindGroup);
     passEncoder.draw(6);
 
     passEncoder.end();
