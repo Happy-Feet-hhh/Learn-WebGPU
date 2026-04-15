@@ -3,22 +3,14 @@ struct VertexOut {
     @location(0) color: vec4f
 }
 
-// 顶点着色器会针对顶点数组中的每个顶点执行一次。
-// 顶点索引通过内置变量传入。
 @vertex
 fn vertexMain(
-    @builtin(vertex_index) vertexIndex: u32
+    @location(0) pos: vec2f,    // 顶点的xy坐标
+    @location(1) color: vec3f,  // rgb颜色值
 ) -> VertexOut {
-    // 创建三角形的顶点数据，后期从cpu侧(ts)中引入
-    let pos = array(
-        vec2f( 0.0,  0.5),  // 上中点
-        vec2f(-0.5, -0.5),  // 左下点
-        vec2f( 0.5, -0.5)   // 右下点
-    );
-
     var output: VertexOut;
-    output.position = vec4f(pos[vertexIndex].x, pos[vertexIndex].y, 0.0, 1.0);
-    output.color = vec4f(1.0, 0.0, 0.0, 1.0);
+    output.position = vec4f(pos, 0.0, 1.0);
+    output.color = vec4f(color, 1.0);
 
     return output;
 }
