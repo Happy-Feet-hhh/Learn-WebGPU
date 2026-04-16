@@ -1,35 +1,26 @@
-// 新模块 —— geometry模块 封装 图形的 顶点数据：位置、颜色和纹理坐标
 export class QuadGeometry {
-    public positions: number[];
-    public colors: number[];
-    public texCoords: number[];
+    public vertices: number[];
+    public inidices: number[];
 
     constructor() {
-        this.positions = [
-            -0.5, -0.5, // x, y
-            0.5, -0.5,
-            -0.5, 0.5,
-            -0.5, 0.5,
-            0.5, 0.5,
-            0.5, -0.5
+
+        const x = 100;
+        const y = 100;
+        const w = 99;
+        const h = 75;
+
+        this.vertices = [
+            // x y            u v           r g b 
+            x, y,            0.0, 0.0, 1.0, 1.0, 1.0, // top left 
+            x + w, y,        1.0, 0.0, 1.0, 1.0, 1.0, // top right
+            x + w, y + h,    1.0, 1.0, 1.0, 1.0, 1.0, // bottom right
+            x, y + h,        0.0, 1.0, 1.0, 1.0, 1.0, // bottom left 
         ];
 
-        this.colors = [
-            1.0, 0.0, 1.0,  // r g b 
-            0.0, 1.0, 1.0,  // r g b 
-            0.0, 1.0, 1.0,  // r g b 
-            1.0, 0.0, 0.0,  // r g b 
-            0.0, 1.0, 0.0,  // r g b 
-            0.0, 0.0, 1.0,  // r g b 
+        this.inidices = [
+            0, 1, 2,
+            2, 3, 0
         ];
-
-        this.texCoords = [
-            0.0, 1.0, // u, v
-            1.0, 1.0,
-            0.0, 0.0,
-            0.0, 0.0,
-            1.0, 0.0,
-            1.0, 1.0
-        ]
     }
+
 }

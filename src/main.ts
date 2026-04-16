@@ -1,142 +1,123 @@
-// 从shader源代码引入
+
 import shaderSource from "./shaders/shader.wgsl?raw";
 import { QuadGeometry } from "./geometry";
 import { Texture } from "./texture";
+import { BufferUtil } from "./buffer-util";
+import { Camera } from "./camera";
+import { Content } from "./content";
 
 class Renderer {
+
   private context!: GPUCanvasContext;
   private device!: GPUDevice;
   private pipeline!: GPURenderPipeline;
-  private positionBuffer!: GPUBuffer;
-  private colorBuffer!: GPUBuffer;
-  // 新增 纹理缓冲区
-  private textureBuffer!: GPUBuffer;
-  // 新增 纹理绑定组
+  private verticesBuffer!: GPUBuffer;
+  private indexBuffer!: GPUBuffer;
+  private projectionViewMatrixBuffer!: GPUBuffer;
+
+  private projectionViewBindGroup!: GPUBindGroup;
   private textureBindGroup!: GPUBindGroup;
-  // 新增 测试用的图像纹理
+
+  private camera!: Camera;
+
+
+
   private testTexture!: Texture;
 
-  constructor() {}
-  
+  constructor() {
+
+  }
+
   public async initialize(): Promise<void> {
-    if (!navigator.gpu) {
-      alert("WebGPU不受支持!");
+
+    const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+
+    this.camera = new Camera(canvas.width, canvas.height);
+
+    this.context = canvas.getContext("webgpu") as GPUCanvasContext;
+
+    if (!this.context) {
+      console.error("WebGPU not supported");
+      alert("WebGPU not supported");
       return;
     }
 
-    const canvas = document.getElementById('canvas') as HTMLCanvasElement;
-    this.context = canvas.getContext('webgpu')!;
-    
-    if(!this.context) {
-      alert("当前画布不支持WebGPU上下文!");
-      return;
-    }
-
-    const adapter = await navigator.gpu.requestAdapter()!;
+    const adapter = await navigator.gpu.requestAdapter();
 
     if (!adapter) {
-      alert("无法找到合适的适配器(显卡)")
+      console.error("No adapter found");
+      alert("No adapter found");
+      return;
     }
 
-    const info = adapter?.info;
-    console.log("显卡的厂商:", info?.vendor);
-    console.log("显卡的架构:", info?.architecture);
+    this.device = await adapter.requestDevice();
 
-    this.device = await adapter?.requestDevice()!;
-    
-    
+    await Content.initialize(this.device);
+
     this.context.configure({
       device: this.device,
-      format: navigator.gpu.getPreferredCanvasFormat(),
+      format: navigator.gpu.getPreferredCanvasFormat()
     });
 
-    // 新增 创建纹理
     this.testTexture = await Texture.createTextureFromURL(this.device, "src/assets/uv_test.png");
 
-    // 新增 在CPU侧定义好顶点的相关数据 位置 颜色 与 纹理坐标
-    // 使用新封装的  QuadGeometry 类
     const geometry = new QuadGeometry();
-    // 直接使用 geometry 对象创建 GPUBuffer
-    this.positionBuffer = this.createBuffer(new Float32Array(geometry.positions));
-    this.colorBuffer = this.createBuffer(new Float32Array(geometry.colors));
-    this.textureBuffer = this.createBuffer(new Float32Array(geometry.texCoords));
 
-    // 新增，准备shader module 着色器模块
+    this.projectionViewMatrixBuffer = BufferUtil.createUniformBuffer(this.device, new Float32Array(16));
+    this.verticesBuffer = BufferUtil.createVertexBuffer(this.device, new Float32Array(geometry.vertices));
+    this.indexBuffer = BufferUtil.createIndexBuffer(this.device, new Uint16Array(geometry.inidices));
+
     this.prepareModel();
   }
 
-  private createBuffer(data: Float32Array): GPUBuffer {
-    const buffer = this.device.createBuffer({
-      size: data.byteLength, 
-      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-      mappedAtCreation: true
-    });
-
-    new Float32Array(buffer.getMappedRange()).set(data);
-    buffer.unmap();
-
-    return buffer;
-  }
 
   private prepareModel(): void {
+
     const shaderModule = this.device.createShaderModule({
       code: shaderSource
     });
 
-    const positionBufferLayout: GPUVertexBufferLayout = {
-      arrayStride: 2 * Float32Array.BYTES_PER_ELEMENT, // 2 个浮点数 × 每个浮点数 4 字节
+    const positionBufferLayout: GPUVertexBufferLayout =
+    {
+      arrayStride: 7 * Float32Array.BYTES_PER_ELEMENT, // 2 floats * 4 bytes per float
       attributes: [
         {
-          shaderLocation: 0,  // 这个与vertex shader代码里的 @location(0)对应
+          shaderLocation: 0,
           offset: 0,
-          format: "float32x2" // 为什么arrayStride定义了这里还要定义
-        }
-      ],
-      stepMode: "vertex"
-    };
-
-    const colorBufferLayout: GPUVertexBufferLayout = {
-      arrayStride: 3 * Float32Array.BYTES_PER_ELEMENT,
-      attributes: [
+          format: "float32x2" // 2 floats
+        },
         {
-          shaderLocation: 1,  // 对应vertex shader的@location(1)
-          offset: 0,
-          format: "float32x3"
-        }
-      ],
-      stepMode: "vertex"
-    };
-
-    // 新增 创建纹理坐标布局 也是顶点缓冲
-    const textureCoordsLayout: GPUVertexBufferLayout = {
-      arrayStride: 2 * Float32Array.BYTES_PER_ELEMENT,
-      attributes: [
+          shaderLocation: 1,
+          offset: 2 * Float32Array.BYTES_PER_ELEMENT,
+          format: "float32x2" // 2 floats
+        },
         {
           shaderLocation: 2,
-          offset: 0,
-          format: "float32x2"
+          offset: 4 * Float32Array.BYTES_PER_ELEMENT,
+          format: "float32x3" // 3 floats
         }
+
       ],
       stepMode: "vertex"
     };
+
+
+
 
     const vertexState: GPUVertexState = {
       module: shaderModule,
-      entryPoint: "vertexMain",
+      entryPoint: "vertexMain", // name of the entry point function for vertex shader, must be same as in shader
       buffers: [
         positionBufferLayout,
-        colorBufferLayout,
-        textureCoordsLayout
       ]
     };
 
     const fragmentState: GPUFragmentState = {
       module: shaderModule,
-      entryPoint: "fragmentMain",
+      entryPoint: "fragmentMain", // name of the entry point function for fragment/pixel shader, must be same as in shader
       targets: [
         {
           format: navigator.gpu.getPreferredCanvasFormat(),
-          // 新增 添加混合字段的属性 也就是 fragShader 的 @location(1) 了
           blend: {
             color: {
               srcFactor: "one",
@@ -153,59 +134,86 @@ class Renderer {
       ]
     };
 
-    // 由于纹理使用了binding group 所以需要手动定义布局
+    const projectionViewBindGroupLayout = this.device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.VERTEX,
+          buffer: {
+            type: "uniform"
+          }
+        }
+      ]
+    });
+
     const textureBindGroupLayout = this.device.createBindGroupLayout({
       entries: [
-        // 第一个entries的数组元素，对应@binding(0)
         {
           binding: 0,
           visibility: GPUShaderStage.FRAGMENT,
           sampler: {}
         },
-        // 第二个entries的数组元素，对应@binding(1)
         {
           binding: 1,
           visibility: GPUShaderStage.FRAGMENT,
           texture: {}
         }
       ]
-    }); 
-    
-    // 新增 对应的管线布局也要手动创建
+    });
+
     const pipelineLayout = this.device.createPipelineLayout({
       bindGroupLayouts: [
+        projectionViewBindGroupLayout,
         textureBindGroupLayout
       ]
     });
 
-    // 有了管线布局和绑定组布局后才可以创建绑定组
     this.textureBindGroup = this.device.createBindGroup({
       layout: textureBindGroupLayout,
       entries: [
         {
           binding: 0,
-          resource: this.testTexture.sampler
+          resource: Content.playerTexture.sampler
         },
         {
           binding: 1,
-          resource: this.testTexture.texture.createView()
+          resource: Content.playerTexture.texture.createView()
         }
       ]
     });
 
+    this.projectionViewBindGroup = this.device.createBindGroup({
+      layout: projectionViewBindGroupLayout,
+      entries: [
+        {
+          binding: 0,
+          resource: {
+            buffer: this.projectionViewMatrixBuffer,
+          }
+        }
+      ]
+    });
+
+
+
     this.pipeline = this.device.createRenderPipeline({
-      layout: pipelineLayout,
       vertex: vertexState,
       fragment: fragmentState,
       primitive: {
-        topology: "triangle-list"
-      }
+        topology: "triangle-list" // type of primitive to render
+      },
+      layout: pipelineLayout,
     });
+
   }
 
-  public draw() {
+  public draw(): void {
+
+    this.camera.update();
+
     const commandEncoder = this.device.createCommandEncoder();
-    const rendePassDescriptor: GPURenderPassDescriptor = {
+
+    const renderPassDescriptor: GPURenderPassDescriptor = {
       colorAttachments: [
         {
           clearValue: { r: 0.8, g: 0.8, b: 0.8, a: 1.0 },
@@ -216,20 +224,24 @@ class Renderer {
       ]
     };
 
-    const passEncoder = commandEncoder.beginRenderPass(rendePassDescriptor);
+    const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
+
+    this.device.queue.writeBuffer(
+      this.projectionViewMatrixBuffer, 
+      0, 
+      this.camera.projectionViewMatrix as Float32Array);
+
     // DRAW HERE
     passEncoder.setPipeline(this.pipeline);
-    passEncoder.setVertexBuffer(0, this.positionBuffer);
-    passEncoder.setVertexBuffer(1, this.colorBuffer);
-    passEncoder.setVertexBuffer(2, this.textureBuffer);
-    passEncoder.setBindGroup(0, this.textureBindGroup);
-    passEncoder.draw(6);
-
+    passEncoder.setIndexBuffer(this.indexBuffer, "uint16");
+    passEncoder.setVertexBuffer(0, this.verticesBuffer);
+    passEncoder.setBindGroup(0, this.projectionViewBindGroup);
+    passEncoder.setBindGroup(1, this.textureBindGroup);
+    passEncoder.drawIndexed(6); // draw 3 vertices
     passEncoder.end();
-
-    const commandBuffer = commandEncoder.finish();
-    this.device.queue.submit([commandBuffer]);
+    this.device.queue.submit([commandEncoder.finish()]);
   }
+
 }
 
 const renderer = new Renderer();
