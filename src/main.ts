@@ -1,248 +1,104 @@
+// main.ts - 游戏入口文件
+// 负责初始化引擎、创建游戏对象、设置更新和绘制回调
+// 游戏架构：Engine 负责渲染管线和游戏循环，各游戏对象负责自身逻辑
+//
+// 整体渲染流程（Bloom 后处理）：
+//   1. 将场景渲染到离屏纹理（sceneTexture）+ 亮度纹理（brightnessTexture）
+//   2. Bloom 效果对亮度纹理进行多次高斯模糊
+//   3. 将模糊后的亮度纹理与原始场景纹理混合，输出到屏幕
 
-import shaderSource from "./shaders/shader.wgsl?raw";
-import { QuadGeometry } from "./geometry";
-import { Texture } from "./texture";
-import { BufferUtil } from "./buffer-util";
-import { Camera } from "./camera";
-import { Content } from "./content";
+import { Content } from "./engine/content";
+import { Engine } from "./engine/engine";
+import { Background } from "./game/background";
+import { BulletManager } from "./game/bullet-manager";
+import { EnemyManager } from "./game/enemy-manager";
+import { ExplosionManager } from "./game/explosion-manager";
+import { Player } from "./game/player";
+import { Color } from "./utils/color";
+import { HighScore } from "./game/high-score";
 
-class Renderer {
+// 创建游戏引擎实例
+const engine = new Engine();
 
-  private context!: GPUCanvasContext;
-  private device!: GPUDevice;
-  private pipeline!: GPURenderPipeline;
-  private verticesBuffer!: GPUBuffer;
-  private indexBuffer!: GPUBuffer;
-  private projectionViewMatrixBuffer!: GPUBuffer;
+// 初始化引擎（异步：等待 WebGPU 设备创建和资源加载完成）
+// .then() 在初始化成功后执行游戏对象的创建和回调注册
+engine.initialize().then(async () => {
 
-  private projectionViewBindGroup!: GPUBindGroup;
-  private textureBindGroup!: GPUBindGroup;
+    // 创建玩家对象，传入输入管理器和游戏区域边界
+    const player = new Player(engine.inputManager,
+        engine.gameBounds[0], engine.gameBounds[1]);
 
-  private camera!: Camera;
+    // 创建背景对象（滚动星空背景）
+    const background = new Background(engine.gameBounds[0], engine.gameBounds[1]);
 
+    // 爆炸管理器：使用对象池模式管理爆炸特效的创建和回收
+    // 对象池避免频繁创建/销毁对象，减少垃圾回收压力
+    const explosionManager = new ExplosionManager();
 
+    // 子弹管理器：管理所有子弹的创建、移动和生命周期
+    // 与玩家关联是因为子弹由玩家发射
+    const bulletManager = new BulletManager(player);
 
-  private testTexture!: Texture;
+    // 最高分管理器
+    const highScore = new HighScore();
 
-  constructor() {
+    // 敌人管理器：管理敌人的生成、移动和碰撞检测
+    // 需要引用 player（追踪/碰撞）、explosionManager（死亡特效）、
+    // bulletManager（子弹碰撞检测）和游戏边界
+    const enemyManager = new EnemyManager(player,
+        explosionManager,
+        bulletManager,
+        engine.gameBounds[0], engine.gameBounds[1],
+        highScore);
 
-  }
+    // 创建 Bloom（泛光）后处理效果
+    // Bloom 效果原理：
+    //   1. 从场景中提取高亮区域（亮度阈值过滤）
+    //   2. 对高亮区域进行多次高斯模糊（水平+垂直方向）
+    //   3. 将模糊后的光晕叠加到原始场景上
+    const postProcessEffect = await engine.effectsFactory.createBloomEffect();
 
-  public async initialize(): Promise<void> {
+    // 注册每帧更新回调
+    // Update 阶段：所有游戏对象更新逻辑状态（移动、碰撞、AI 等）
+    // dt 参数为帧间隔时间（毫秒），用于帧率无关的运动计算
+    engine.onUpdate = (dt: number) => {
+        player.update(dt);               // 更新玩家位置和状态
+        background.update(dt);           // 更新背景滚动
+        enemyManager.update(dt);         // 更新敌人（生成、移动、碰撞）
+        explosionManager.update(dt);     // 更新爆炸动画
+        bulletManager.update(dt);        // 更新子弹位置和碰撞
+    };
 
-    const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+    // 注册每帧绘制回调
+    // Draw 阶段：所有游戏对象提交绘制命令到精灵渲染器
+    engine.onDraw = () => {
 
-    this.camera = new Camera(canvas.width, canvas.height);
+        // 将渲染目标重定向到 Bloom 效果的离屏纹理
+        // sceneTexture：存储完整的场景颜色（第一个渲染目标）
+        // brightnessTexture：存储场景中的高亮部分（第二个渲染目标，MRT）
+        engine.setDestinationTexture(postProcessEffect.sceneTexture.texture);
+        engine.setDestinationTexture2(postProcessEffect.brightnessTexture.texture);
+        
+        // 绘制顺序决定 Z 轴层次（先绘制的在底层）：
+        // 背景 → 玩家/敌人 → 子弹 → 爆炸特效 → UI
+        background.draw(engine.spriteRenderer);
+        player.draw(engine.spriteRenderer);
+        enemyManager.draw(engine.spriteRenderer);
+        bulletManager.draw(engine.spriteRenderer);
+        explosionManager.draw(engine.spriteRenderer);
 
-    this.context = canvas.getContext("webgpu") as GPUCanvasContext;
+        // 绘制 UI（最高分显示）
+        highScore.draw(engine.spriteRenderer);
 
-    if (!this.context) {
-      console.error("WebGPU not supported");
-      alert("WebGPU not supported");
-      return;
-    }
-
-    const adapter = await navigator.gpu.requestAdapter();
-
-    if (!adapter) {
-      console.error("No adapter found");
-      alert("No adapter found");
-      return;
-    }
-
-    this.device = await adapter.requestDevice();
-
-    await Content.initialize(this.device);
-
-    this.context.configure({
-      device: this.device,
-      format: navigator.gpu.getPreferredCanvasFormat()
-    });
-
-    this.testTexture = await Texture.createTextureFromURL(this.device, "src/assets/uv_test.png");
-
-    const geometry = new QuadGeometry();
-
-    this.projectionViewMatrixBuffer = BufferUtil.createUniformBuffer(this.device, new Float32Array(16));
-    this.verticesBuffer = BufferUtil.createVertexBuffer(this.device, new Float32Array(geometry.vertices));
-    this.indexBuffer = BufferUtil.createIndexBuffer(this.device, new Uint16Array(geometry.inidices));
-
-    this.prepareModel();
-  }
-
-
-  private prepareModel(): void {
-
-    const shaderModule = this.device.createShaderModule({
-      code: shaderSource
-    });
-
-    const positionBufferLayout: GPUVertexBufferLayout =
-    {
-      arrayStride: 7 * Float32Array.BYTES_PER_ELEMENT, // 2 floats * 4 bytes per float
-      attributes: [
-        {
-          shaderLocation: 0,
-          offset: 0,
-          format: "float32x2" // 2 floats
-        },
-        {
-          shaderLocation: 1,
-          offset: 2 * Float32Array.BYTES_PER_ELEMENT,
-          format: "float32x2" // 2 floats
-        },
-        {
-          shaderLocation: 2,
-          offset: 4 * Float32Array.BYTES_PER_ELEMENT,
-          format: "float32x3" // 3 floats
-        }
-
-      ],
-      stepMode: "vertex"
+        // 执行 Bloom 后处理：
+        // 读取离屏的场景纹理和亮度纹理，应用模糊算法，
+        // 最终将结果输出到 Canvas 纹理（即屏幕）
+        postProcessEffect.draw(engine.getCanvasTexture().createView());
+  
     };
 
 
 
-
-    const vertexState: GPUVertexState = {
-      module: shaderModule,
-      entryPoint: "vertexMain", // name of the entry point function for vertex shader, must be same as in shader
-      buffers: [
-        positionBufferLayout,
-      ]
-    };
-
-    const fragmentState: GPUFragmentState = {
-      module: shaderModule,
-      entryPoint: "fragmentMain", // name of the entry point function for fragment/pixel shader, must be same as in shader
-      targets: [
-        {
-          format: navigator.gpu.getPreferredCanvasFormat(),
-          blend: {
-            color: {
-              srcFactor: "one",
-              dstFactor: "one-minus-src-alpha",
-              operation: "add"
-            },
-            alpha: {
-              srcFactor: "one",
-              dstFactor: "one-minus-src-alpha",
-              operation: "add"
-            }
-          }
-        }
-      ]
-    };
-
-    const projectionViewBindGroupLayout = this.device.createBindGroupLayout({
-      entries: [
-        {
-          binding: 0,
-          visibility: GPUShaderStage.VERTEX,
-          buffer: {
-            type: "uniform"
-          }
-        }
-      ]
-    });
-
-    const textureBindGroupLayout = this.device.createBindGroupLayout({
-      entries: [
-        {
-          binding: 0,
-          visibility: GPUShaderStage.FRAGMENT,
-          sampler: {}
-        },
-        {
-          binding: 1,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: {}
-        }
-      ]
-    });
-
-    const pipelineLayout = this.device.createPipelineLayout({
-      bindGroupLayouts: [
-        projectionViewBindGroupLayout,
-        textureBindGroupLayout
-      ]
-    });
-
-    this.textureBindGroup = this.device.createBindGroup({
-      layout: textureBindGroupLayout,
-      entries: [
-        {
-          binding: 0,
-          resource: Content.playerTexture.sampler
-        },
-        {
-          binding: 1,
-          resource: Content.playerTexture.texture.createView()
-        }
-      ]
-    });
-
-    this.projectionViewBindGroup = this.device.createBindGroup({
-      layout: projectionViewBindGroupLayout,
-      entries: [
-        {
-          binding: 0,
-          resource: {
-            buffer: this.projectionViewMatrixBuffer,
-          }
-        }
-      ]
-    });
-
-
-
-    this.pipeline = this.device.createRenderPipeline({
-      vertex: vertexState,
-      fragment: fragmentState,
-      primitive: {
-        topology: "triangle-list" // type of primitive to render
-      },
-      layout: pipelineLayout,
-    });
-
-  }
-
-  public draw(): void {
-
-    this.camera.update();
-
-    const commandEncoder = this.device.createCommandEncoder();
-
-    const renderPassDescriptor: GPURenderPassDescriptor = {
-      colorAttachments: [
-        {
-          clearValue: { r: 0.8, g: 0.8, b: 0.8, a: 1.0 },
-          loadOp: "clear",
-          storeOp: "store",
-          view: this.context.getCurrentTexture().createView()
-        }
-      ]
-    };
-
-    const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
-
-    this.device.queue.writeBuffer(
-      this.projectionViewMatrixBuffer, 
-      0, 
-      this.camera.projectionViewMatrix as Float32Array);
-
-    // DRAW HERE
-    passEncoder.setPipeline(this.pipeline);
-    passEncoder.setIndexBuffer(this.indexBuffer, "uint16");
-    passEncoder.setVertexBuffer(0, this.verticesBuffer);
-    passEncoder.setBindGroup(0, this.projectionViewBindGroup);
-    passEncoder.setBindGroup(1, this.textureBindGroup);
-    passEncoder.drawIndexed(6); // draw 3 vertices
-    passEncoder.end();
-    this.device.queue.submit([commandEncoder.finish()]);
-  }
-
-}
-
-const renderer = new Renderer();
-renderer.initialize().then(() => renderer.draw());
+    // 启动游戏主循环（开始第一帧的渲染）
+    engine.draw()
+});

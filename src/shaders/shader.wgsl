@@ -1,39 +1,179 @@
+// =============================================================================
+// WGSL 主着色器 (Main Shader)
+// =============================================================================
+//
+// 【WGSL 基础知识】
+// WGSL (WebGPU Shading Language) 是 WebGPU 的着色器语言。
+// 每个 WGSL 程序包含入口函数（entry function），用 @vertex 或 @fragment 装饰器标记。
+// 变量声明使用 var 关键字，类型在后（如 var x: f32 = 1.0;）。
+// 向量类型如 vec2f (2个f32)、vec3f (3个f32)、vec4f (4个f32)。
+// 矩阵类型如 mat4x4f (4x4 的 f32 矩阵)。
+//
+// 【资源绑定模型 (@group / @binding)】
+// WebGPU 使用"绑定组"（Bind Group）模型来管理 GPU 资源：
+//   @group(N) @binding(M) 表示该资源位于第 N 个绑定组的第 M 个槽位。
+// 这些绑定必须与 TypeScript 端创建的 GPUBindGroup 顺序严格对应。
+// 例如：
+//   - @group(0) @binding(0) → 对应 TypeScript 中 bindGroupLayout 的 group 0, binding 0
+//   - @group(1) @binding(0) → 对应 TypeScript 中 bindGroupLayout 的 group 1, binding 0
+//
+// 【本文件功能概述】
+// 本着色器用于游戏场景的主渲染管线：
+//   - 顶点着色器：对每个顶点应用 投影-视图矩阵 变换
+//   - 片段着色器：采样纹理颜色，并同时输出到两个渲染目标（MRT）：
+//       1. 常规颜色输出
+//       2. 亮度提取输出（用于后续 Bloom 泛光后处理效果）
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// 顶点着色器输出结构体
+// 顶点着色器处理完每个顶点后，将数据传递给片段着色器
+// ---------------------------------------------------------------------------
 struct VertexOut {
+    // @builtin(position) — 内建属性，表示裁剪空间（Clip Space）中的顶点位置
+    // GPU 会自动将此 vec4f 进行透视除法（除以 w 分量）得到 NDC（标准化设备坐标），
+    // 然后映射到屏幕像素坐标。这是顶点着色器必须输出的内建变量。
     @builtin(position) position: vec4f,
+
+    // @location(0) — 自定义输出，编号为 0 的顶点数据通道
+    // 这里传递纹理坐标 (UV)，用于在片段着色器中采样纹理
     @location(0) texCoords: vec2f,
+
+    // @location(1) — 自定义输出，编号为 1 的顶点数据通道
+    // 这里传递顶点颜色（从 vec3f 扩展为 vec4f，alpha 固定为 1.0）
     @location(1) color: vec4f,
 }
 
+// ---------------------------------------------------------------------------
+// Uniform 变量：投影-视图矩阵
+// ---------------------------------------------------------------------------
+// @group(0) @binding(0) — 位于绑定组 0 的第 0 个槽位
+// var<uniform> 表示这是一个 uniform 存储地址空间变量
+// uniform 变量在每次绘制调用（draw call）中对所有顶点/片段都相同（只读）
+// 投影-视图矩阵 = 投影矩阵 × 视图矩阵，用于将世界坐标变换到裁剪空间
 @group(0) @binding(0)
 var<uniform> projectionViewMatrix: mat4x4f;
 
+// ---------------------------------------------------------------------------
+// 顶点着色器入口函数
+// ---------------------------------------------------------------------------
+// @vertex 装饰器标记此函数为顶点着色器入口点
+// 每个顶点都会执行一次此函数
+//
+// 输入参数说明：
+//   @location(0) pos: vec2f   — 顶点的 2D 位置坐标 (x, y)，来自顶点缓冲区
+//   @location(1) texCoords: vec2f — 纹理坐标 (u, v)，来自顶点缓冲区
+//   @location(2) color: vec3f — 顶点颜色 (r, g, b)，来自顶点缓冲区
+//
+// @location(N) 的编号必须与 TypeScript 端 GPUVertexBufferLayout 中的
+// arrayStride 和 attributes 的 shaderLocation 严格对应
 @vertex 
 fn vertexMain(
-    @location(0) pos: vec2f,  // xy
-    @location(1) texCoords: vec2f, // uv
-    @location(2) color: vec3f,  // rgb
+    @location(0) pos: vec2f,
+    @location(1) texCoords: vec2f,
+    @location(2) color: vec3f,
 ) -> VertexOut 
 { 
-   
     var output : VertexOut; 
 
+    // 矩阵变换：将 2D 位置 (x, y) 扩展为齐次坐标 (x, y, 0.0, 1.0)
+    // 然后左乘 projectionViewMatrix 得到裁剪空间坐标
+    // 齐次坐标中 z=0.0（2D 游戏，z 轴无意义），w=1.0（标准点坐标）
     output.position = projectionViewMatrix * vec4f(pos, 0.0, 1.0);
+
+    // 直接传递纹理坐标，不做变换
     output.texCoords = texCoords;
+
+    // 将 vec3f 颜色扩展为 vec4f，alpha 通道设为 1.0（完全不透明）
     output.color = vec4f(color, 1.0);
 
     return output;
 }
 
+// ---------------------------------------------------------------------------
+// 片段着色器资源绑定
+// ---------------------------------------------------------------------------
+// 纹理采样器（sampler）— 定义纹理采样方式（如线性过滤、重复模式等）
+// @group(1) @binding(0) — 位于绑定组 1 的第 0 个槽位
 @group(1) @binding(0)
 var texSampler: sampler;
 
+// 2D 纹理 — 要采样的图像数据
+// @group(1) @binding(1) — 位于绑定组 1 的第 1 个槽位
+// texture_2d<f32> 表示一个存储 f32 精度的 2D 纹理
 @group(1) @binding(1)
 var tex: texture_2d<f32>;
 
-
-@fragment
-fn fragmentMain(fragData: VertexOut ) -> @location(0) vec4f 
+// ---------------------------------------------------------------------------
+// 片段着色器输出结构体 — 多渲染目标 (MRT)
+// ---------------------------------------------------------------------------
+// MRT (Multiple Render Targets) 允许片段着色器同时输出到多个颜色附件。
+// 这比传统的单输出渲染更高效，避免了多遍渲染的开销。
+struct FragmentOut 
 {
+    // @location(0) — 第一个渲染目标：常规的场景颜色
+    @location(0) color: vec4f,
+
+    // @location(1) — 第二个渲染目标：亮度信息
+    // 用于后续的 Bloom（泛光）后处理效果
+    @location(1) brightness: vec4f,
+}
+
+// ---------------------------------------------------------------------------
+// 亮度阈值常量
+// ---------------------------------------------------------------------------
+// 只有亮度超过此阈值的像素才会被提取到 brightness 输出中
+// 0.4 是一个经验值，确保只有较亮的像素（如光源、高光）参与泛光效果
+// 较低的阈值 = 更多像素产生泛光，效果更强
+// 较高的阈值 = 只有最亮的像素产生泛光，效果更精细
+const brightnessThreshold: f32 = 0.4;
+
+// ---------------------------------------------------------------------------
+// 片段着色器入口函数
+// ---------------------------------------------------------------------------
+// @fragment 装饰器标记此函数为片段着色器入口点
+// 每个像素（片段）都会执行一次此函数
+// 返回 FragmentOut 结构体，同时写入两个渲染目标
+@fragment
+fn fragmentMain(fragData: VertexOut ) -> FragmentOut
+{
+    // textureSample() 是 WGSL 内建函数，用于采样纹理
+    // 参数：纹理、采样器、纹理坐标
+    // 返回该纹理坐标处的 RGBA 颜色值（已考虑采样器的过滤模式）
     var textureColor = textureSample(tex, texSampler, fragData.texCoords);
-    return fragData.color * textureColor;
+
+    var out: FragmentOut;
+
+    // 第一个渲染目标：直接输出纹理颜色
+    out.color = textureColor;
+
+    // =======================================================================
+    // 亮度提取 — 用于 Bloom 泛光效果
+    // =======================================================================
+    // 使用 ITU-R BT.601 标准的亮度计算公式：
+    //   L = 0.299 * R + 0.587 * G + 0.114 * B
+    //
+    // 这些权重反映了人眼对不同颜色光的敏感度：
+    //   - 绿色 (0.587)：人眼对绿色最敏感
+    //   - 红色 (0.299)：次之
+    //   - 蓝色 (0.114)：最不敏感
+    //
+    // dot() 是向量点积函数，此处等价于各分量相乘后求和
+    // =======================================================================
+    var l = dot(textureColor.rgb, vec3f(0.299, 0.587, 0.114));
+
+    // 亮度判定：超过阈值的像素被认为是"亮"的
+    if(l > brightnessThreshold)
+    {
+        // 亮像素：将完整颜色写入亮度通道，用于后续模糊和泛光合成
+        out.brightness = textureColor;
+    }
+    else
+    {
+        // 暗像素：输出黑色（亮度为 0），但保留 alpha 通道
+        // 保留 alpha 是为了在后续处理中保持正确的透明度混合
+        out.brightness = vec4f(0.0, 0.0, 0.0, textureColor.a);
+    }
+
+    return out;
 }
